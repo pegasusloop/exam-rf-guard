@@ -6,21 +6,38 @@ import org.junit.Test
 
 class WifiIdentityCollisionTest {
 
-    @Test
-    fun differentAccessPointWithSameSsidIsSuppressed() {
-        val tracker = DeviceTracker()
+    private val baselineAddress = "10:00:00:00:00:01"
+    private val newAddress = "20:11:22:33:44:55"
 
+    private fun observe(
+        tracker: DeviceTracker,
+        address: String,
+        name: String = "SCHOOL",
+        timestampMs: Long = 0L,
+        hidden: Boolean = false
+    ) {
         tracker.update(
             RfObservation(
-                "10:00:00:00:00:01",
+                address,
                 ScanSource.WIFI,
-                "SCHOOL",
+                name,
                 -55,
                 null,
-                false,
-                0L
+                hidden,
+                timestampMs
             )
         )
+    }
+
+    private fun classify(
+        extraAddresses: List<String>,
+        acknowledged: Set<String> = emptySet(),
+        extraName: String = "SCHOOL",
+        extraHidden: Boolean = false
+    ): WatchView {
+        val tracker = DeviceTracker()
+
+        observe(tracker, baselineAddress)
 
         val baseline = SignalSnapshot.capture(
             "Classroom",
@@ -29,30 +46,97 @@ class WifiIdentityCollisionTest {
             tracker.snapshot(1_000L, includeInactive = true)
         )
 
-        val counts = baselineGroupCounts(baseline)
-        val baselineAddresses = baselineWifiAddresses(baseline)
+        extraAddresses.forEachIndexed { index, address ->
+            observe(
+                tracker,
+                address,
+                extraName,
+                100_000L + index,
+                extraHidden
+            )
+        }
 
-        // A distinct, globally administered BSSID.
-        tracker.update(
-            RfObservation(
+        return watchView(
+            tracker.snapshot(101_000L, includeInactive = true),
+            baselineGroupCounts(baseline),
+            acknowledged,
+            101_000L,
+            baselineWifiAddresses(baseline)
+        )
+    }
+
+    @Test
+    fun differentBssidWithSameSsidIsReviewOnly() {
+        val result = classify(listOf(newAddress))
+
+        assertEquals(0, result.wifi.size)
+        assertEquals(0, result.count)
+        assertEquals(1, result.sameNameWifi.size)
+        assertEquals(newAddress, result.sameNameWifi.single().key)
+    }
+
+    @Test
+    fun baselineBssidIsNotReviewCandidate() {
+        val result = classify(emptyList())
+
+        assertTrue(result.sameNameWifi.isEmpty())
+        assertEquals(0, result.count)
+    }
+
+    @Test
+    fun recognizedRouterAddressVariantIsExcluded() {
+        val result = classify(
+            listOf("10:00:00:00:00:02")
+        )
+
+        assertTrue(result.sameNameWifi.isEmpty())
+        assertEquals(0, result.count)
+    }
+
+    @Test
+    fun hiddenWifiIsNotSameNameReviewCandidate() {
+        val result = classify(
+            listOf("20:11:22:33:44:55"),
+            extraName = "",
+            extraHidden = true
+        )
+
+        assertTrue(result.sameNameWifi.isEmpty())
+    }
+
+    @Test
+    fun acknowledgedSameNameGroupIsExcluded() {
+        val result = classify(
+            listOf(newAddress),
+            acknowledged = setOf("WIFI:name:school")
+        )
+
+        assertTrue(result.sameNameWifi.isEmpty())
+        assertEquals(0, result.count)
+    }
+
+    @Test
+    fun twoDistinctSameNameBssidsAreBothAvailableForReview() {
+        val result = classify(
+            listOf(
                 "20:11:22:33:44:55",
-                ScanSource.WIFI,
-                "SCHOOL",
-                -45,
-                null,
-                false,
-                100_000L
+                "30:11:22:33:44:66"
             )
         )
 
-        val result = watchView(
-            tracker.snapshot(101_000L, includeInactive = true),
-            counts,
-            emptySet(),
-            101_000L,
-            baselineAddresses
+        assertEquals(2, result.sameNameWifi.size)
+        assertEquals(0, result.count)
+    }
+
+    @Test
+    fun newSsidRemainsAnAlertNotSameNameReview() {
+        val result = classify(
+            listOf(newAddress),
+            extraName = "NEW_NETWORK"
         )
 
-        assertEquals(0, result.wifi.size)
+        assertTrue(result.sameNameWifi.isEmpty())
+        assertEquals(1, result.wifi.size)
+        assertEquals(1, result.count)
     }
 }
